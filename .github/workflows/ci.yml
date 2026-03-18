@@ -1,0 +1,68 @@
+name: Go Backend CI
+
+on:
+  push:
+    branches: [ "main", "develop" ]
+  pull_request:
+    branches: [ "main", "develop" ]
+
+jobs:
+  build-test-and-dockerize:
+    name: Build, Test and Validate Docker
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Go 1.24 Ortamını Kur
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.24'
+        cache: true
+
+    - name: Code Analysis (GolangCI-Lint)
+      uses: golangci/golangci-lint-action@v6
+      with:
+        version: latest
+
+    - name: Run Unit and Integration Tests
+      env:
+        DB_HOST: localhost
+        DB_USER: testuser
+        DB_PASSWORD: testpassword
+        DB_NAME: testdb
+        DB_PORT: 5432
+        REDIS_ADDR: localhost:6379
+      run: go test -v -race -cover ./...
+
+    - name: Build Project
+      run: go build -v ./...
+
+    - name: Build Docker Image
+      run: docker build -t payment-ledger-service-test .
