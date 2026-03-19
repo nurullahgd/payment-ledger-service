@@ -27,14 +27,12 @@ func (r *TenantRepository) CreateTenantSchema(ctx context.Context, merchantID st
 		return err
 	}
 	defer func() {
-		err := tx.Rollback(ctx)
-		if err != nil && err.Error() != "tx is closed" {
-			log.Printf("Beklenmeyen rollback hatası: %v", err)
+		if rbErr := tx.Rollback(ctx); rbErr != nil && rbErr.Error() != "tx is closed" {
+			log.Printf("unexpected rollback error: %v", rbErr)
 		}
 	}()
 
-	schemaSQL := fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS %s`, schemaName)
-	if _, err := tx.Exec(ctx, schemaSQL); err != nil {
+	if _, err := tx.Exec(ctx, fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS %s`, schemaName)); err != nil {
 		return fmt.Errorf("failed to create schema: %w", err)
 	}
 
@@ -48,8 +46,9 @@ func (r *TenantRepository) CreateTenantSchema(ctx context.Context, merchantID st
 			description TEXT,
 			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 		);
-		CREATE INDEX IF NOT EXISTS idx_status ON %s.transactions(status);
-	`, schemaName, schemaName)
+		CREATE INDEX IF NOT EXISTS idx_transactions_status ON %s.transactions(status);
+		CREATE INDEX IF NOT EXISTS idx_transactions_reference ON %s.transactions(reference);
+	`, schemaName, schemaName, schemaName)
 	if _, err := tx.Exec(ctx, txTableSQL); err != nil {
 		return fmt.Errorf("failed to create transactions table: %w", err)
 	}
@@ -74,7 +73,8 @@ func (r *TenantRepository) CreateTenantSchema(ctx context.Context, merchantID st
 			change_amount BIGINT NOT NULL,
 			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 		);
-	`, schemaName)
+		CREATE INDEX IF NOT EXISTS idx_ledger_ref ON %s.ledger(transaction_ref);
+	`, schemaName, schemaName)
 	if _, err := tx.Exec(ctx, ledgerTableSQL); err != nil {
 		return fmt.Errorf("failed to create ledger table: %w", err)
 	}
@@ -93,22 +93,24 @@ func (r *TenantRepository) CreateTenantSchema(ctx context.Context, merchantID st
 
 	return nil
 }
-func (r *TenantRepository) GetBalance(ctx context.Context, merchantID string) (int64, string, error) {
 
-	schemaName := fmt.Sprintf("tenant_%s", merchantID)
-	query := fmt.Sprintf(`
-		SELECT balance, currency 
-		FROM %s.ledger 
-		ORDER BY created_at DESC, id DESC 
-		LIMIT 1`, schemaName)
+func (r *TenantRepository) GetBalance(ctx context.Context, merchantID string) (int64, string, error) {
+	schemaName := fmt.Sprintf("tenant_%s", strings.ReplaceAll(merchantID, "-", "_"))
 
 	var balance int64
 	var currency string
 
-	err := r.db.QueryRow(ctx, query).Scan(&balance, &currency)
+	query := fmt.Sprintf(`
+		SELECT b.available_balance, m.currency
+		FROM %s.balances b
+		JOIN public.merchants m ON m.id = $1
+		WHERE b.merchant_id = $1
+	`, schemaName)
+
+	err := r.db.QueryRow(ctx, query, merchantID).Scan(&balance, &currency)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, "TRY", nil
+			return 0, "USD", nil
 		}
 		return 0, "", fmt.Errorf("failed to fetch balance: %w", err)
 	}

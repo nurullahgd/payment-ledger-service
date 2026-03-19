@@ -16,6 +16,7 @@ func SeedData(ctx context.Context, db *pgxpool.Pool, tenantRepo *TenantRepositor
 		api_key VARCHAR(100) UNIQUE NOT NULL,
 		currency VARCHAR(3) NOT NULL,
 		status VARCHAR(20) DEFAULT 'active',
+		webhook_url TEXT,
 		created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 	);`
 
@@ -24,23 +25,23 @@ func SeedData(ctx context.Context, db *pgxpool.Pool, tenantRepo *TenantRepositor
 	}
 
 	merchants := []struct {
-		ID       string
-		Name     string
-		APIKey   string
-		Currency string
+		ID         string
+		Name       string
+		APIKey     string
+		Currency   string
+		WebhookURL string
 	}{
-		{"merchant_1", "Test Merchant One", "sk_test_12345", "USD"},
-		{"merchant_2", "Test Merchant Two", "sk_test_67890", "EUR"},
+		{"merchant_1", "Test Merchant One", "sk_test_12345", "USD", ""},
+		{"merchant_2", "Test Merchant Two", "sk_test_67890", "EUR", ""},
 	}
 
 	for _, m := range merchants {
 		insertSQL := `
-		INSERT INTO public.merchants (id, name, api_key, currency, status)
-		VALUES ($1, $2, $3, $4, 'active')
+		INSERT INTO public.merchants (id, name, api_key, currency, status, webhook_url)
+		VALUES ($1, $2, $3, $4, 'active', NULLIF($5, ''))
 		ON CONFLICT (id) DO NOTHING;`
 
-		_, err := db.Exec(ctx, insertSQL, m.ID, m.Name, m.APIKey, m.Currency)
-		if err != nil {
+		if _, err := db.Exec(ctx, insertSQL, m.ID, m.Name, m.APIKey, m.Currency, m.WebhookURL); err != nil {
 			return fmt.Errorf("failed to insert merchant %s: %w", m.ID, err)
 		}
 
@@ -49,6 +50,6 @@ func SeedData(ctx context.Context, db *pgxpool.Pool, tenantRepo *TenantRepositor
 		}
 	}
 
-	log.Println("Seed data executed: Test merchants and tenant schemas are ready.")
+	log.Println("Seed data executed: test merchants and tenant schemas are ready.")
 	return nil
 }

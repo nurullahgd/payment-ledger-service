@@ -21,6 +21,24 @@ func NewLedgerRepository(db *pgxpool.Pool) *LedgerRepository {
 	return &LedgerRepository{db: db}
 }
 
+func (r *LedgerRepository) InsertPendingTransaction(ctx context.Context, merchantID, reference, txType, description string, amount int64) (string, error) {
+	schemaName := fmt.Sprintf("tenant_%s", strings.ReplaceAll(merchantID, "-", "_"))
+
+	var txID string
+	query := fmt.Sprintf(`
+		INSERT INTO %s.transactions (reference, type, amount, status, description)
+		VALUES ($1, $2, $3, 'pending', $4)
+		RETURNING id
+	`, schemaName)
+
+	err := r.db.QueryRow(ctx, query, reference, txType, amount, description).Scan(&txID)
+	if err != nil {
+		return "", fmt.Errorf("failed to insert pending transaction: %w", err)
+	}
+
+	return txID, nil
+}
+
 func (r *LedgerRepository) ProcessTransaction(ctx context.Context, merchantID string, txRef string, txType string, amount int64) error {
 	schemaName := fmt.Sprintf("tenant_%s", strings.ReplaceAll(merchantID, "-", "_"))
 
@@ -29,9 +47,8 @@ func (r *LedgerRepository) ProcessTransaction(ctx context.Context, merchantID st
 		return err
 	}
 	defer func() {
-		err := tx.Rollback(ctx)
-		if err != nil && err.Error() != "tx is closed" {
-			log.Printf("Beklenmeyen rollback hatası: %v", err)
+		if rbErr := tx.Rollback(ctx); rbErr != nil && rbErr.Error() != "tx is closed" {
+			log.Printf("unexpected rollback error: %v", rbErr)
 		}
 	}()
 

@@ -21,24 +21,26 @@ func NewIdempotencyRepository(client *redis.Client, ttl time.Duration) *Idempote
 	}
 }
 
-func (r *IdempotencyRepository) CheckOrRecord(ctx context.Context, merchantID, reference string, responsePayload string) (string, bool, error) {
+func (r *IdempotencyRepository) Get(ctx context.Context, merchantID, reference string) (string, bool, error) {
 	key := fmt.Sprintf("idempotency:%s:%s", merchantID, reference)
 
-	err := r.client.SetArgs(ctx, key, responsePayload, redis.SetArgs{
-		Mode: "NX",
-		TTL:  r.ttl,
-	}).Err()
-
+	val, err := r.client.Get(ctx, key).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", false, nil
+	}
 	if err != nil {
-		if errors.Is(err, redis.Nil) {
-			existingPayload, getErr := r.client.Get(ctx, key).Result()
-			if getErr != nil {
-				return "", false, fmt.Errorf("failed to get existing idempotency key: %w", getErr)
-			}
-			return existingPayload, true, nil
-		}
-		return "", false, fmt.Errorf("failed to execute SET with NX option: %w", err)
+		return "", false, fmt.Errorf("failed to get idempotency record: %w", err)
 	}
 
-	return responsePayload, false, nil
+	return val, true, nil
+}
+
+func (r *IdempotencyRepository) Set(ctx context.Context, merchantID, reference, payload string) error {
+	key := fmt.Sprintf("idempotency:%s:%s", merchantID, reference)
+
+	if err := r.client.Set(ctx, key, payload, r.ttl).Err(); err != nil {
+		return fmt.Errorf("failed to set idempotency record: %w", err)
+	}
+
+	return nil
 }

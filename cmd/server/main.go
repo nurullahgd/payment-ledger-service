@@ -7,14 +7,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/joho/godotenv"
-	"github.com/redis/go-redis/v9"
-
+	"github.com/nurullahgd/payment-ledger-service/internal/config"
 	"github.com/nurullahgd/payment-ledger-service/internal/handler"
 	"github.com/nurullahgd/payment-ledger-service/internal/repository"
 	"github.com/nurullahgd/payment-ledger-service/internal/service"
@@ -22,62 +18,49 @@ import (
 )
 
 func main() {
-	_ = godotenv.Load()
-	dbURL := getEnv("DATABASE_URL", "postgres://ledger_user:ledger_password@localhost:5433/ledger_db?sslmode=disable")
-	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
-	port := getEnv("PORT", "8080")
-
-	workerCountStr := getEnv("WORKER_COUNT", "5")
-	workerCount, err := strconv.Atoi(workerCountStr)
-	if err != nil || workerCount <= 0 {
-		workerCount = 5
-	}
-
+	cfg := config.Load()
 	ctx := context.Background()
 
 	log.Println("Connecting to PostgreSQL...")
-	dbPool, err := pgxpool.New(ctx, dbURL)
+	dbPool, err := repository.NewPostgresRepository(ctx, cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 	defer dbPool.Close()
-	if err := dbPool.Ping(ctx); err != nil {
-		log.Fatalf("Failed to ping database: %v", err)
-	}
 
 	log.Println("Connecting to Redis...")
-	redisClient := redis.NewClient(&redis.Options{
-		Addr: redisAddr,
-	})
-	defer redisClient.Close()
-	if err := redisClient.Ping(ctx).Err(); err != nil {
-		log.Fatalf("Failed to ping redis: %v", err)
+	redisCache, err := repository.NewRedisCache(ctx, cfg.RedisAddr, "", 0)
+	if err != nil {
+		log.Fatalf("Failed to connect to redis: %v", err)
 	}
+	defer redisCache.Client.Close()
 
 	ledgerRepo := repository.NewLedgerRepository(dbPool)
 	tenantRepo := repository.NewTenantRepository(dbPool)
-	ledgerService := service.NewLedgerService(tenantRepo)
+
 	log.Println("Running database seed...")
 	if err := repository.SeedData(ctx, dbPool, tenantRepo); err != nil {
 		log.Fatalf("Failed to seed database: %v", err)
 	}
-	idempotencyRepo := repository.NewIdempotencyRepository(redisClient, 24*time.Hour)
 
-	pool := worker.NewPool(workerCount, 1000, ledgerRepo)
+	idempotencyRepo := repository.NewIdempotencyRepository(redisCache.Client, 24*time.Hour)
+	ledgerService := service.NewLedgerService(tenantRepo, ledgerRepo)
+
+	pool := worker.NewPool(cfg.WorkerCount, 1000, ledgerRepo)
 	pool.Start(ctx)
 
 	api := handler.NewAPI(pool, idempotencyRepo, ledgerService)
 	router := api.Routes()
 
 	srv := &http.Server{
-		Addr:    ":" + port,
+		Addr:    ":" + cfg.Port,
 		Handler: router,
 	}
 
 	go func() {
-		log.Printf("Server is starting on port %s...", port)
+		log.Printf("Server starting on port %s...", cfg.Port)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("Listen and serve error: %v", err)
+			log.Fatalf("Listen error: %v", err)
 		}
 	}()
 
@@ -94,13 +77,5 @@ func main() {
 	}
 
 	pool.Stop()
-
-	log.Println("Server exiting gracefully. Goodbye!")
-}
-
-func getEnv(key, fallback string) string {
-	if value, exists := os.LookupEnv(key); exists {
-		return value
-	}
-	return fallback
+	log.Println("Server exited gracefully.")
 }

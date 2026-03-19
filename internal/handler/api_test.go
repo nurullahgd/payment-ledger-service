@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,11 +13,12 @@ import (
 	"github.com/nurullahgd/payment-ledger-service/pkg/worker"
 )
 
-// --- Mocks ---
+const mockTxID = "550e8400-e29b-41d4-a716-446655440000"
 
 type mockLedgerService struct {
 	balance  int64
 	currency string
+	txID     string
 	err      error
 }
 
@@ -24,17 +26,37 @@ func (m *mockLedgerService) GetCurrentBalance(_ context.Context, _ string) (int6
 	return m.balance, m.currency, m.err
 }
 
-type mockIdempotency struct {
-	payload    string
-	isReplayed bool
-	err        error
+func (m *mockLedgerService) CreatePendingTransaction(_ context.Context, _, _, _, _ string, _ int64) (string, error) {
+	return m.txID, m.err
 }
 
-func (m *mockIdempotency) CheckOrRecord(_ context.Context, _, _, payload string) (string, bool, error) {
-	if m.payload != "" {
-		return m.payload, m.isReplayed, m.err
+type mockIdempotency struct {
+	stored     map[string]string
+	isReplayed bool
+	getErr     error
+	setErr     error
+}
+
+func (m *mockIdempotency) Get(_ context.Context, merchantID, reference string) (string, bool, error) {
+	if m.getErr != nil {
+		return "", false, m.getErr
 	}
-	return payload, m.isReplayed, m.err
+	key := merchantID + ":" + reference
+	if v, ok := m.stored[key]; ok && m.isReplayed {
+		return v, true, nil
+	}
+	return "", false, nil
+}
+
+func (m *mockIdempotency) Set(_ context.Context, merchantID, reference, payload string) error {
+	if m.setErr != nil {
+		return m.setErr
+	}
+	if m.stored == nil {
+		m.stored = make(map[string]string)
+	}
+	m.stored[merchantID+":"+reference] = payload
+	return nil
 }
 
 type mockPool struct {
@@ -45,20 +67,16 @@ func (m *mockPool) Submit(_ worker.TransactionTask) error {
 	return m.err
 }
 
-// --- Helpers ---
-
 func newTestAPI(ls handler.LedgerService, ic handler.IdempotencyChecker, pool handler.TaskSubmitter) *handler.API {
 	return handler.NewAPI(pool, ic, ls)
 }
-
-// --- Tests ---
 
 func TestGetBalance_OK(t *testing.T) {
 	ls := &mockLedgerService{balance: 15000, currency: "USD"}
 	api := newTestAPI(ls, nil, nil)
 	router := api.Routes()
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/balances", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/balance", nil)
 	req.Header.Set("X-API-Key", "sk_test_12345")
 	rr := httptest.NewRecorder()
 
@@ -77,6 +95,22 @@ func TestGetBalance_OK(t *testing.T) {
 	}
 	if resp["currency"] != "USD" {
 		t.Errorf("expected currency USD, got %v", resp["currency"])
+	}
+}
+
+func TestGetBalance_ServiceError(t *testing.T) {
+	ls := &mockLedgerService{err: errors.New("db error")}
+	api := newTestAPI(ls, nil, nil)
+	router := api.Routes()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/balance", nil)
+	req.Header.Set("X-API-Key", "sk_test_12345")
+	rr := httptest.NewRecorder()
+
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", rr.Code)
 	}
 }
 
@@ -142,13 +176,15 @@ func TestSubmitTransaction_InvalidType(t *testing.T) {
 func TestSubmitTransaction_Accepted(t *testing.T) {
 	idem := &mockIdempotency{}
 	pool := &mockPool{}
-	api := newTestAPI(nil, idem, pool)
+	ls := &mockLedgerService{txID: mockTxID}
+	api := newTestAPI(ls, idem, pool)
 	router := api.Routes()
 
 	body, _ := json.Marshal(map[string]interface{}{
-		"reference": "ref-ok-001",
-		"type":      "credit",
-		"amount":    2000,
+		"reference":   "ref-ok-001",
+		"type":        "credit",
+		"amount":      2000,
+		"description": "Invoice #100",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/transactions", bytes.NewReader(body))
 	req.Header.Set("X-API-Key", "sk_test_12345")
@@ -159,11 +195,25 @@ func TestSubmitTransaction_Accepted(t *testing.T) {
 	if rr.Code != http.StatusAccepted {
 		t.Fatalf("expected 202, got %d — body: %s", rr.Code, rr.Body.String())
 	}
+
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp["id"] != mockTxID {
+		t.Errorf("expected id %q, got %v", mockTxID, resp["id"])
+	}
+	if resp["status"] != "pending" {
+		t.Errorf("expected status 'pending', got %v", resp["status"])
+	}
 }
 
 func TestSubmitTransaction_IdempotencyReplayed(t *testing.T) {
-	existing := `{"reference":"ref-dup","status":"pending"}`
-	idem := &mockIdempotency{payload: existing, isReplayed: true}
+	existingPayload := `{"id":"` + mockTxID + `","reference":"ref-dup","status":"pending"}`
+	idem := &mockIdempotency{
+		stored:     map[string]string{"sk_test_12345:ref-dup": existingPayload},
+		isReplayed: true,
+	}
 	api := newTestAPI(nil, idem, nil)
 	router := api.Routes()
 
@@ -184,8 +234,74 @@ func TestSubmitTransaction_IdempotencyReplayed(t *testing.T) {
 	if rr.Header().Get("Idempotency-Replayed") != "true" {
 		t.Error("expected Idempotency-Replayed: true header")
 	}
-	if rr.Body.String() != existing {
-		t.Errorf("expected cached payload %q, got %q", existing, rr.Body.String())
+	if rr.Body.String() != existingPayload {
+		t.Errorf("expected cached payload %q, got %q", existingPayload, rr.Body.String())
+	}
+}
+
+func TestSubmitTransaction_IdempotencyGetError(t *testing.T) {
+	idem := &mockIdempotency{getErr: errors.New("redis down")}
+	api := newTestAPI(nil, idem, nil)
+	router := api.Routes()
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"reference": "ref-005",
+		"type":      "credit",
+		"amount":    100,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/transactions", bytes.NewReader(body))
+	req.Header.Set("X-API-Key", "sk_test_12345")
+	rr := httptest.NewRecorder()
+
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", rr.Code)
+	}
+}
+
+func TestSubmitTransaction_CreateTxError(t *testing.T) {
+	idem := &mockIdempotency{}
+	ls := &mockLedgerService{err: errors.New("db constraint")}
+	api := newTestAPI(ls, idem, nil)
+	router := api.Routes()
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"reference": "ref-006",
+		"type":      "credit",
+		"amount":    100,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/transactions", bytes.NewReader(body))
+	req.Header.Set("X-API-Key", "sk_test_12345")
+	rr := httptest.NewRecorder()
+
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", rr.Code)
+	}
+}
+
+func TestSubmitTransaction_QueueFull(t *testing.T) {
+	idem := &mockIdempotency{}
+	pool := &mockPool{err: errors.New("queue full")}
+	ls := &mockLedgerService{txID: mockTxID}
+	api := newTestAPI(ls, idem, pool)
+	router := api.Routes()
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"reference": "ref-007",
+		"type":      "credit",
+		"amount":    100,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/transactions", bytes.NewReader(body))
+	req.Header.Set("X-API-Key", "sk_test_12345")
+	rr := httptest.NewRecorder()
+
+	router.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d", rr.Code)
 	}
 }
 

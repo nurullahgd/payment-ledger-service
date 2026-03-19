@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -10,17 +11,16 @@ import (
 	"github.com/nurullahgd/payment-ledger-service/pkg/worker"
 )
 
-// LedgerService defines balance-related operations.
 type LedgerService interface {
 	GetCurrentBalance(ctx context.Context, merchantID string) (int64, string, error)
+	CreatePendingTransaction(ctx context.Context, merchantID, reference, txType, description string, amount int64) (string, error)
 }
 
-// IdempotencyChecker handles idempotent request deduplication.
 type IdempotencyChecker interface {
-	CheckOrRecord(ctx context.Context, merchantID, reference, responsePayload string) (string, bool, error)
+	Get(ctx context.Context, merchantID, reference string) (string, bool, error)
+	Set(ctx context.Context, merchantID, reference, payload string) error
 }
 
-// TaskSubmitter submits async transaction tasks to the worker pool.
 type TaskSubmitter interface {
 	Submit(task worker.TransactionTask) error
 }
@@ -68,19 +68,19 @@ func (a *API) Routes() chi.Router {
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {
-
 		r.Post("/transactions", a.HandleSubmitTransaction)
-		r.Get("/balances", a.GetBalance)
+		r.Get("/balance", a.GetBalance)
 	})
 
 	return r
 }
 
 type SubmitTransactionRequest struct {
-	Reference   string `json:"reference"`
-	Type        string `json:"type"`
-	Amount      int64  `json:"amount"`
-	Description string `json:"description"`
+	Reference   string                 `json:"reference"`
+	Type        string                 `json:"type"`
+	Amount      int64                  `json:"amount"`
+	Description string                 `json:"description"`
+	Metadata    map[string]interface{} `json:"metadata"`
 }
 
 func (a *API) HandleSubmitTransaction(w http.ResponseWriter, r *http.Request) {
@@ -102,46 +102,59 @@ func (a *API) HandleSubmitTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	originalResponseMap := map[string]string{
-		"status":    "pending",
-		"reference": req.Reference,
-	}
-	originalResponseBytes, _ := json.Marshal(originalResponseMap)
-	originalResponsePayload := string(originalResponseBytes)
-
-	cachedPayload, isReplayed, err := a.idempotency.CheckOrRecord(r.Context(), merchantID, req.Reference, originalResponsePayload)
+	cached, isReplayed, err := a.idempotency.Get(r.Context(), merchantID, req.Reference)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Could not process idempotency check")
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Idempotency check failed")
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/json")
 
 	if isReplayed {
+		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Idempotency-Replayed", "true")
 		w.WriteHeader(http.StatusAccepted)
-		_, _ = w.Write([]byte(cachedPayload))
+		_, _ = w.Write([]byte(cached))
 		return
 	}
 
-	taskErr := a.pool.Submit(worker.TransactionTask{
-		MerchantID: merchantID,
-		Reference:  req.Reference,
-		Type:       req.Type,
-		Amount:     req.Amount,
+	txID, err := a.ledgerService.CreatePendingTransaction(r.Context(), merchantID, req.Reference, req.Type, req.Description, req.Amount)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Could not create transaction")
+		return
+	}
+
+	respBytes, _ := json.Marshal(map[string]string{
+		"id":        txID,
+		"status":    "pending",
+		"reference": req.Reference,
 	})
 
-	if taskErr != nil {
+	if err := a.idempotency.Set(r.Context(), merchantID, req.Reference, string(respBytes)); err != nil {
+		log.Printf("failed to record idempotency key for ref %s: %v", req.Reference, err)
+	}
+
+	if err := a.pool.Submit(worker.TransactionTask{
+		MerchantID:  merchantID,
+		Reference:   req.Reference,
+		Type:        req.Type,
+		Amount:      req.Amount,
+		Description: req.Description,
+	}); err != nil {
 		writeError(w, http.StatusTooManyRequests, "QUEUE_FULL", "System is under heavy load, please try again")
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	_, _ = w.Write(originalResponseBytes)
+	_, _ = w.Write(respBytes)
 }
 
 func (a *API) GetBalance(w http.ResponseWriter, r *http.Request) {
-	merchantID := "merchant_1"
+	apiKey := r.Header.Get("X-API-Key")
+	if apiKey == "" {
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Missing X-API-Key header")
+		return
+	}
+	merchantID := apiKey
 
 	balance, currency, err := a.ledgerService.GetCurrentBalance(r.Context(), merchantID)
 	if err != nil {

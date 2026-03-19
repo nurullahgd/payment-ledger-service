@@ -53,12 +53,11 @@ jobs:
 
     - name: Run Unit and Integration Tests
       env:
-        DB_HOST: localhost
-        DB_USER: testuser
-        DB_PASSWORD: testpassword
-        DB_NAME: testdb
-        DB_PORT: 5432
+        DATABASE_URL: postgres://testuser:testpassword@localhost:5432/testdb?sslmode=disable
         REDIS_ADDR: localhost:6379
+        WORKER_COUNT: 2
+        PORT: 8080
+        RATE_LIMIT_PER_MINUTE: 60
       run: go test -v -race -cover ./...
 
     - name: Build Project

@@ -1,7 +1,6 @@
 package config
 
 import (
-	"log"
 	"os"
 	"strconv"
 
@@ -9,34 +8,37 @@ import (
 )
 
 type Config struct {
-	DatabaseURL string
-	WorkerCount int
-	Port        string
+	DatabaseURL        string
+	RedisAddr          string
+	WorkerCount        int
+	Port               string
+	RateLimitPerMinute int
 }
 
 func Load() *Config {
 	_ = godotenv.Load()
 
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		log.Fatal("DATABASE_URL is not set in environment variables")
+	return &Config{
+		DatabaseURL:        getEnv("DATABASE_URL", "postgres://ledger_user:ledger_password@localhost:5433/ledger_db?sslmode=disable"),
+		RedisAddr:          getEnv("REDIS_ADDR", "localhost:6379"),
+		WorkerCount:        getEnvInt("WORKER_COUNT", 5),
+		Port:               getEnv("PORT", "8080"),
+		RateLimitPerMinute: getEnvInt("RATE_LIMIT_PER_MINUTE", 60),
 	}
+}
 
-	workerCount := 5
-	if wc := os.Getenv("WORKER_COUNT"); wc != "" {
-		if parsed, err := strconv.Atoi(wc); err == nil {
-			workerCount = parsed
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func getEnvInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
 		}
 	}
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
-	return &Config{
-		DatabaseURL: dbURL,
-		WorkerCount: workerCount,
-		Port:        port,
-	}
+	return fallback
 }

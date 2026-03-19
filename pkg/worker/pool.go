@@ -9,10 +9,11 @@ import (
 )
 
 type TransactionTask struct {
-	MerchantID string
-	Reference  string
-	Type       string
-	Amount     int64
+	MerchantID  string
+	Reference   string
+	Type        string
+	Amount      int64
+	Description string
 }
 
 type LedgerProcessor interface {
