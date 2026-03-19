@@ -2,24 +2,61 @@ package middleware
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+
+	"github.com/nurullahgd/payment-ledger-service/internal/domain"
 )
 
 type contextKey string
 
-const TenantIDKey contextKey = "tenantID"
+const MerchantKey contextKey = "merchant"
 
-func TenantMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tenantID := r.Header.Get("X-Tenant-ID")
+type MerchantResolver interface {
+	GetMerchantByAPIKey(ctx context.Context, apiKey string) (*domain.Merchant, error)
+}
 
-		if tenantID == "" {
-			http.Error(w, "X-Tenant-ID header eksik veya geçersiz", http.StatusUnauthorized)
-			return
-		}
+func TenantMiddleware(resolver MerchantResolver) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			apiKey := r.Header.Get("X-API-Key")
+			if apiKey == "" {
+				writeJSON(w, http.StatusUnauthorized, "UNAUTHORIZED", "Missing X-API-Key header")
+				return
+			}
 
-		ctx := context.WithValue(r.Context(), TenantIDKey, tenantID)
+			merchant, err := resolver.GetMerchantByAPIKey(r.Context(), apiKey)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Could not resolve merchant")
+				return
+			}
+			if merchant == nil {
+				writeJSON(w, http.StatusUnauthorized, "UNAUTHORIZED", "Invalid API key")
+				return
+			}
+			if !merchant.IsActive() {
+				writeJSON(w, http.StatusForbidden, "MERCHANT_SUSPENDED", "Merchant account is suspended")
+				return
+			}
 
-		next.ServeHTTP(w, r.WithContext(ctx))
+			ctx := context.WithValue(r.Context(), MerchantKey, merchant)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+func MerchantFromContext(ctx context.Context) *domain.Merchant {
+	m, _ := ctx.Value(MerchantKey).(*domain.Merchant)
+	return m
+}
+
+func writeJSON(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": map[string]string{
+			"code":    code,
+			"message": message,
+		},
 	})
 }

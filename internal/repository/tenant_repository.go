@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nurullahgd/payment-ledger-service/internal/domain"
 )
 
 type TenantRepository struct {
@@ -92,6 +93,30 @@ func (r *TenantRepository) CreateTenantSchema(ctx context.Context, merchantID st
 	}
 
 	return nil
+}
+
+func (r *TenantRepository) GetMerchantByAPIKey(ctx context.Context, apiKey string) (*domain.Merchant, error) {
+	query := `
+		SELECT id, name, api_key, currency, status, COALESCE(webhook_url, '')
+		FROM public.merchants
+		WHERE api_key = $1
+	`
+
+	var m domain.Merchant
+	var status string
+
+	err := r.db.QueryRow(ctx, query, apiKey).Scan(
+		&m.ID, &m.Name, &m.APIKey, &m.Currency, &status, &m.WebhookURL,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to fetch merchant by api key: %w", err)
+	}
+
+	m.Status = domain.MerchantStatus(status)
+	return &m, nil
 }
 
 func (r *TenantRepository) GetBalance(ctx context.Context, merchantID string) (int64, string, error) {
