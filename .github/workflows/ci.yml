@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-test-and-dockerize:
-    name: Build, Test and Validate Docker
+    name: Build, Test and Dockerize
     runs-on: ubuntu-latest
 
     services:
@@ -40,13 +40,13 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Go 1.24 Ortamını Kur
+    - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.24'
+        go-version: "1.25.5"
         cache: true
 
-    - name: Code Analysis (GolangCI-Lint)
+    - name: Code Analysis
       uses: golangci/golangci-lint-action@v6
       with:
         version: latest
