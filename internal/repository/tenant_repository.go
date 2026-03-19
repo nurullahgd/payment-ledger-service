@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -22,7 +23,12 @@ func (r *TenantRepository) CreateTenantSchema(ctx context.Context, merchantID st
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() {
+		err := tx.Rollback(ctx)
+		if err != nil && err.Error() != "tx is closed" {
+			log.Printf("Beklenmeyen rollback hatası: %v", err)
+		}
+	}()
 
 	schemaSQL := fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS %s`, schemaName)
 	if _, err := tx.Exec(ctx, schemaSQL); err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -26,7 +27,12 @@ func (r *LedgerRepository) ProcessTransaction(ctx context.Context, merchantID st
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() {
+		err := tx.Rollback(ctx)
+		if err != nil && err.Error() != "tx is closed" {
+			log.Printf("Beklenmeyen rollback hatası: %v", err)
+		}
+	}()
 
 	var previousBalance int64
 	queryBalance := fmt.Sprintf(`

@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -20,22 +21,24 @@ func NewIdempotencyRepository(client *redis.Client, ttl time.Duration) *Idempote
 	}
 }
 
-func (r *IdempotencyRepository) CheckOrRecord(ctx context.Context, merchantID, reference string, responsePayload string) (cachedResponse string, isReplayed bool, err error) {
+func (r *IdempotencyRepository) CheckOrRecord(ctx context.Context, merchantID, reference string, responsePayload string) (string, bool, error) {
 	key := fmt.Sprintf("idempotency:%s:%s", merchantID, reference)
 
-	success, err := r.client.SetNX(ctx, key, responsePayload, r.ttl).Result()
+	err := r.client.SetArgs(ctx, key, responsePayload, redis.SetArgs{
+		Mode: "NX",
+		TTL:  r.ttl,
+	}).Err()
+
 	if err != nil {
-		return "", false, fmt.Errorf("failed to execute SETNX on redis: %w", err)
+		if errors.Is(err, redis.Nil) {
+			existingPayload, getErr := r.client.Get(ctx, key).Result()
+			if getErr != nil {
+				return "", false, fmt.Errorf("failed to get existing idempotency key: %w", getErr)
+			}
+			return existingPayload, true, nil
+		}
+		return "", false, fmt.Errorf("failed to execute SET with NX option: %w", err)
 	}
 
-	if success {
-		return responsePayload, false, nil
-	}
-
-	existingPayload, err := r.client.Get(ctx, key).Result()
-	if err != nil {
-		return "", false, fmt.Errorf("failed to get existing idempotency key: %w", err)
-	}
-
-	return existingPayload, true, nil
+	return responsePayload, false, nil
 }
