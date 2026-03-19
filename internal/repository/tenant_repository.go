@@ -2,9 +2,12 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -17,7 +20,7 @@ func NewTenantRepository(db *pgxpool.Pool) *TenantRepository {
 }
 
 func (r *TenantRepository) CreateTenantSchema(ctx context.Context, merchantID string) error {
-	schemaName := fmt.Sprintf("tenant_%s", merchantID)
+	schemaName := fmt.Sprintf("tenant_%s", strings.ReplaceAll(merchantID, "-", "_"))
 
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
@@ -89,4 +92,26 @@ func (r *TenantRepository) CreateTenantSchema(ctx context.Context, merchantID st
 	}
 
 	return nil
+}
+func (r *TenantRepository) GetBalance(ctx context.Context, merchantID string) (int64, string, error) {
+
+	schemaName := fmt.Sprintf("tenant_%s", merchantID)
+	query := fmt.Sprintf(`
+		SELECT balance, currency 
+		FROM %s.ledger 
+		ORDER BY created_at DESC, id DESC 
+		LIMIT 1`, schemaName)
+
+	var balance int64
+	var currency string
+
+	err := r.db.QueryRow(ctx, query).Scan(&balance, &currency)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, "TRY", nil
+		}
+		return 0, "", fmt.Errorf("failed to fetch balance: %w", err)
+	}
+
+	return balance, currency, nil
 }

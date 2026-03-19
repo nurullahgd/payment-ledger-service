@@ -17,6 +17,7 @@ import (
 
 	"github.com/nurullahgd/payment-ledger-service/internal/handler"
 	"github.com/nurullahgd/payment-ledger-service/internal/repository"
+	"github.com/nurullahgd/payment-ledger-service/internal/service"
 	"github.com/nurullahgd/payment-ledger-service/pkg/worker"
 )
 
@@ -54,12 +55,18 @@ func main() {
 	}
 
 	ledgerRepo := repository.NewLedgerRepository(dbPool)
+	tenantRepo := repository.NewTenantRepository(dbPool)
+	ledgerService := service.NewLedgerService(tenantRepo)
+	log.Println("Running database seed...")
+	if err := repository.SeedData(ctx, dbPool, tenantRepo); err != nil {
+		log.Fatalf("Failed to seed database: %v", err)
+	}
 	idempotencyRepo := repository.NewIdempotencyRepository(redisClient, 24*time.Hour)
 
 	pool := worker.NewPool(workerCount, 1000, ledgerRepo)
 	pool.Start(ctx)
 
-	api := handler.NewAPI(pool, idempotencyRepo)
+	api := handler.NewAPI(pool, idempotencyRepo, ledgerService)
 	router := api.Routes()
 
 	srv := &http.Server{

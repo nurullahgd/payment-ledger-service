@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,7 +22,7 @@ func NewLedgerRepository(db *pgxpool.Pool) *LedgerRepository {
 }
 
 func (r *LedgerRepository) ProcessTransaction(ctx context.Context, merchantID string, txRef string, txType string, amount int64) error {
-	schemaName := fmt.Sprintf("tenant_%s", merchantID)
+	schemaName := fmt.Sprintf("tenant_%s", strings.ReplaceAll(merchantID, "-", "_"))
 
 	tx, err := r.db.Begin(ctx)
 	if err != nil {

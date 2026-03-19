@@ -1,24 +1,41 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/nurullahgd/payment-ledger-service/internal/repository"
 	"github.com/nurullahgd/payment-ledger-service/pkg/worker"
 )
 
-type API struct {
-	pool        *worker.Pool
-	idempotency *repository.IdempotencyRepository
+// LedgerService defines balance-related operations.
+type LedgerService interface {
+	GetCurrentBalance(ctx context.Context, merchantID string) (int64, string, error)
 }
 
-func NewAPI(pool *worker.Pool, idempRepo *repository.IdempotencyRepository) *API {
+// IdempotencyChecker handles idempotent request deduplication.
+type IdempotencyChecker interface {
+	CheckOrRecord(ctx context.Context, merchantID, reference, responsePayload string) (string, bool, error)
+}
+
+// TaskSubmitter submits async transaction tasks to the worker pool.
+type TaskSubmitter interface {
+	Submit(task worker.TransactionTask) error
+}
+
+type API struct {
+	pool          TaskSubmitter
+	idempotency   IdempotencyChecker
+	ledgerService LedgerService
+}
+
+func NewAPI(pool TaskSubmitter, idempRepo IdempotencyChecker, ls LedgerService) *API {
 	return &API{
-		pool:        pool,
-		idempotency: idempRepo,
+		pool:          pool,
+		idempotency:   idempRepo,
+		ledgerService: ls,
 	}
 }
 
@@ -53,6 +70,7 @@ func (a *API) Routes() chi.Router {
 	r.Route("/api/v1", func(r chi.Router) {
 
 		r.Post("/transactions", a.HandleSubmitTransaction)
+		r.Get("/balances", a.GetBalance)
 	})
 
 	return r
@@ -120,4 +138,21 @@ func (a *API) HandleSubmitTransaction(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusAccepted)
 	_, _ = w.Write(originalResponseBytes)
+}
+
+func (a *API) GetBalance(w http.ResponseWriter, r *http.Request) {
+	merchantID := "merchant_1"
+
+	balance, currency, err := a.ledgerService.GetCurrentBalance(r.Context(), merchantID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Could not fetch balance")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"merchant_id": merchantID,
+		"balance":     balance,
+		"currency":    currency,
+	})
 }
