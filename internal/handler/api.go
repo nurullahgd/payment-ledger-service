@@ -6,8 +6,21 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/nurullahgd/payment-ledger-service/internal/repository"
 	"github.com/nurullahgd/payment-ledger-service/pkg/worker"
 )
+
+type API struct {
+	pool        *worker.Pool
+	idempotency *repository.IdempotencyRepository
+}
+
+func NewAPI(pool *worker.Pool, idempRepo *repository.IdempotencyRepository) *API {
+	return &API{
+		pool:        pool,
+		idempotency: idempRepo,
+	}
+}
 
 type ErrorResponse struct {
 	Error struct {
@@ -15,14 +28,6 @@ type ErrorResponse struct {
 		Message   string `json:"message"`
 		RequestID string `json:"request_id,omitempty"`
 	} `json:"error"`
-}
-
-type API struct {
-	pool *worker.Pool
-}
-
-func NewAPI(pool *worker.Pool) *API {
-	return &API{pool: pool}
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
@@ -63,7 +68,7 @@ type SubmitTransactionRequest struct {
 func (a *API) HandleSubmitTransaction(w http.ResponseWriter, r *http.Request) {
 	apiKey := r.Header.Get("X-API-Key")
 	if apiKey == "" {
-		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Requests are scoped to a merchant via an X-API-Key header")
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Missing X-API-Key header")
 		return
 	}
 	merchantID := apiKey
@@ -74,30 +79,45 @@ func (a *API) HandleSubmitTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Reference == "" {
-		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "Reference is required")
-		return
-	}
-	if req.Type != "credit" && req.Type != "debit" {
-		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "Type must be 'credit' or 'debit'")
-		return
-	}
-	if req.Amount <= 0 {
-		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "Amount must be a positive integer")
+	if req.Reference == "" || (req.Type != "credit" && req.Type != "debit") || req.Amount <= 0 {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "Invalid input parameters")
 		return
 	}
 
-	a.pool.Submit(worker.TransactionTask{
+	originalResponseMap := map[string]string{
+		"status":    "pending",
+		"reference": req.Reference,
+	}
+	originalResponseBytes, _ := json.Marshal(originalResponseMap)
+	originalResponsePayload := string(originalResponseBytes)
+
+	cachedPayload, isReplayed, err := a.idempotency.CheckOrRecord(r.Context(), merchantID, req.Reference, originalResponsePayload)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Could not process idempotency check")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	if isReplayed {
+		w.Header().Set("Idempotency-Replayed", "true")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(cachedPayload))
+		return
+	}
+
+	taskErr := a.pool.Submit(worker.TransactionTask{
 		MerchantID: merchantID,
 		Reference:  req.Reference,
 		Type:       req.Type,
 		Amount:     req.Amount,
 	})
 
-	w.Header().Set("Content-Type", "application/json")
+	if taskErr != nil {
+		writeError(w, http.StatusTooManyRequests, "QUEUE_FULL", "System is under heavy load, please try again")
+		return
+	}
+
 	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"status":    "pending",
-		"reference": req.Reference,
-	})
+	_, _ = w.Write(originalResponseBytes)
 }
