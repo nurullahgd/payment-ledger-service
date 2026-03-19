@@ -2,10 +2,14 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+var ErrInsufficientBalance = errors.New("INSUFFICIENT_BALANCE")
 
 type LedgerRepository struct {
 	db *pgxpool.Pool
@@ -24,22 +28,18 @@ func (r *LedgerRepository) ProcessTransaction(ctx context.Context, merchantID st
 	}
 	defer tx.Rollback(ctx)
 
-	// Thread safe
-	_, err = tx.Exec(ctx, `SELECT id FROM public.merchants WHERE id = $1 FOR UPDATE`, merchantID)
-	if err != nil {
-		return fmt.Errorf("failed to lock merchant: %w", err)
-	}
-
-
 	var previousBalance int64
 	queryBalance := fmt.Sprintf(`
-		SELECT new_balance FROM %s.ledger 
-		ORDER BY created_at DESC LIMIT 1
+		SELECT available_balance FROM %s.balances 
+		WHERE merchant_id = $1 FOR UPDATE
 	`, schemaName)
 
-	err = tx.QueryRow(ctx, queryBalance).Scan(&previousBalance)
-	if err != nil && err.Error() != "no rows in result set" {
-		return fmt.Errorf("failed to query balance: %w", err)
+	err = tx.QueryRow(ctx, queryBalance, merchantID).Scan(&previousBalance)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("balance record not found for merchant %s", merchantID)
+		}
+		return fmt.Errorf("failed to lock and query balance: %w", err)
 	}
 
 	newBalance := previousBalance
@@ -51,12 +51,24 @@ func (r *LedgerRepository) ProcessTransaction(ctx context.Context, merchantID st
 	} else if txType == "debit" {
 		if previousBalance < amount {
 			failSQL := fmt.Sprintf(`UPDATE %s.transactions SET status = 'failed' WHERE reference = $1`, schemaName)
-			tx.Exec(ctx, failSQL, txRef)
-			tx.Commit(ctx) 
-			return fmt.Errorf("INSUFFICIENT_BALANCE: debit of %d exceeds available balance of %d", amount, previousBalance)
+			if _, failErr := tx.Exec(ctx, failSQL, txRef); failErr != nil {
+				return fmt.Errorf("failed to update tx status to failed: %w", failErr)
+			}
+			if commitErr := tx.Commit(ctx); commitErr != nil {
+				return fmt.Errorf("failed to commit failed transaction state: %w", commitErr)
+			}
+			return fmt.Errorf("%w: debit of %d exceeds available balance of %d", ErrInsufficientBalance, amount, previousBalance)
 		}
 		newBalance -= amount
 		changeAmount = -amount
+	}
+
+	updateBalanceSQL := fmt.Sprintf(`
+		UPDATE %s.balances SET available_balance = $1, updated_at = NOW() 
+		WHERE merchant_id = $2
+	`, schemaName)
+	if _, err := tx.Exec(ctx, updateBalanceSQL, newBalance, merchantID); err != nil {
+		return fmt.Errorf("failed to update balance: %w", err)
 	}
 
 	insertLedgerSQL := fmt.Sprintf(`
@@ -72,7 +84,6 @@ func (r *LedgerRepository) ProcessTransaction(ctx context.Context, merchantID st
 		return fmt.Errorf("failed to update transaction status: %w", err)
 	}
 
-	// 7. Her şey başarılıysa onayla (Commit)
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
