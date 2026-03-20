@@ -7,7 +7,8 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
+	chimw "github.com/go-chi/chi/v5/middleware"
+	tenantmw "github.com/nurullahgd/payment-ledger-service/internal/middleware"
 	"github.com/nurullahgd/payment-ledger-service/pkg/worker"
 )
 
@@ -29,13 +30,15 @@ type API struct {
 	pool          TaskSubmitter
 	idempotency   IdempotencyChecker
 	ledgerService LedgerService
+	resolver      tenantmw.MerchantResolver
 }
 
-func NewAPI(pool TaskSubmitter, idempRepo IdempotencyChecker, ls LedgerService) *API {
+func NewAPI(pool TaskSubmitter, idempRepo IdempotencyChecker, ls LedgerService, resolver tenantmw.MerchantResolver) *API {
 	return &API{
 		pool:          pool,
 		idempotency:   idempRepo,
 		ledgerService: ls,
+		resolver:      resolver,
 	}
 }
 
@@ -58,9 +61,9 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 
 func (a *API) Routes() chi.Router {
 	r := chi.NewRouter()
-	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
-	r.Use(middleware.RequestID)
+	r.Use(chimw.Logger)
+	r.Use(chimw.Recoverer)
+	r.Use(chimw.RequestID)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -68,6 +71,7 @@ func (a *API) Routes() chi.Router {
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {
+		r.Use(tenantmw.TenantMiddleware(a.resolver))
 		r.Post("/transactions", a.HandleSubmitTransaction)
 		r.Get("/balance", a.GetBalance)
 	})
@@ -84,12 +88,7 @@ type SubmitTransactionRequest struct {
 }
 
 func (a *API) HandleSubmitTransaction(w http.ResponseWriter, r *http.Request) {
-	apiKey := r.Header.Get("X-API-Key")
-	if apiKey == "" {
-		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Missing X-API-Key header")
-		return
-	}
-	merchantID := apiKey
+	merchant := tenantmw.MerchantFromContext(r.Context())
 
 	var req SubmitTransactionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -102,7 +101,7 @@ func (a *API) HandleSubmitTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cached, isReplayed, err := a.idempotency.Get(r.Context(), merchantID, req.Reference)
+	cached, isReplayed, err := a.idempotency.Get(r.Context(), merchant.ID, req.Reference)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Idempotency check failed")
 		return
@@ -116,7 +115,7 @@ func (a *API) HandleSubmitTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	txID, err := a.ledgerService.CreatePendingTransaction(r.Context(), merchantID, req.Reference, req.Type, req.Description, req.Amount)
+	txID, err := a.ledgerService.CreatePendingTransaction(r.Context(), merchant.ID, req.Reference, req.Type, req.Description, req.Amount)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Could not create transaction")
 		return
@@ -128,12 +127,12 @@ func (a *API) HandleSubmitTransaction(w http.ResponseWriter, r *http.Request) {
 		"reference": req.Reference,
 	})
 
-	if err := a.idempotency.Set(r.Context(), merchantID, req.Reference, string(respBytes)); err != nil {
+	if err := a.idempotency.Set(r.Context(), merchant.ID, req.Reference, string(respBytes)); err != nil {
 		log.Printf("failed to record idempotency key for ref %s: %v", req.Reference, err)
 	}
 
 	if err := a.pool.Submit(worker.TransactionTask{
-		MerchantID:  merchantID,
+		MerchantID:  merchant.ID,
 		Reference:   req.Reference,
 		Type:        req.Type,
 		Amount:      req.Amount,
@@ -149,14 +148,9 @@ func (a *API) HandleSubmitTransaction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) GetBalance(w http.ResponseWriter, r *http.Request) {
-	apiKey := r.Header.Get("X-API-Key")
-	if apiKey == "" {
-		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Missing X-API-Key header")
-		return
-	}
-	merchantID := apiKey
+	merchant := tenantmw.MerchantFromContext(r.Context())
 
-	balance, currency, err := a.ledgerService.GetCurrentBalance(r.Context(), merchantID)
+	balance, currency, err := a.ledgerService.GetCurrentBalance(r.Context(), merchant.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Could not fetch balance")
 		return
@@ -164,7 +158,7 @@ func (a *API) GetBalance(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"merchant_id": merchantID,
+		"merchant_id": merchant.ID,
 		"balance":     balance,
 		"currency":    currency,
 	})

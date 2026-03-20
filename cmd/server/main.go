@@ -49,7 +49,7 @@ func main() {
 	pool := worker.NewPool(cfg.WorkerCount, 1000, ledgerRepo)
 	pool.Start(ctx)
 
-	api := handler.NewAPI(pool, idempotencyRepo, ledgerService)
+	api := handler.NewAPI(pool, idempotencyRepo, ledgerService, tenantRepo)
 	router := api.Routes()
 
 	srv := &http.Server{
