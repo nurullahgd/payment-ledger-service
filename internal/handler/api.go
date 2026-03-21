@@ -3,11 +3,14 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/nurullahgd/payment-ledger-service/internal/domain"
 	tenantmw "github.com/nurullahgd/payment-ledger-service/internal/middleware"
 	"github.com/nurullahgd/payment-ledger-service/pkg/worker"
 )
@@ -15,6 +18,9 @@ import (
 type LedgerService interface {
 	GetCurrentBalance(ctx context.Context, merchantID string) (int64, string, error)
 	CreatePendingTransaction(ctx context.Context, merchantID, reference, txType, description string, amount int64) (string, error)
+	GetTransactionByID(ctx context.Context, merchantID, txID string) (*domain.Transaction, error)
+	ListTransactions(ctx context.Context, merchantID, statusFilter string, limit, offset int) ([]*domain.Transaction, int, error)
+	ListLedgerEntries(ctx context.Context, merchantID string, limit, offset int) ([]*domain.LedgerEntry, int, error)
 }
 
 type IdempotencyChecker interface {
@@ -59,6 +65,48 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+type PaginatedResponse struct {
+	Data       interface{} `json:"data"`
+	Pagination Pagination  `json:"pagination"`
+}
+
+type Pagination struct {
+	Page       int `json:"page"`
+	Limit      int `json:"limit"`
+	Total      int `json:"total"`
+	TotalPages int `json:"total_pages"`
+}
+
+func parsePagination(r *http.Request) (page, limit, offset int) {
+	page = 1
+	limit = 20
+
+	if p := r.URL.Query().Get("page"); p != "" {
+		if v, err := strconv.Atoi(p); err == nil && v > 0 {
+			page = v
+		}
+	}
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if v, err := strconv.Atoi(l); err == nil && v > 0 && v <= 100 {
+			limit = v
+		}
+	}
+
+	offset = (page - 1) * limit
+	return
+}
+
+func totalPages(total, limit int) int {
+	if limit == 0 {
+		return 0
+	}
+	pages := total / limit
+	if total%limit != 0 {
+		pages++
+	}
+	return pages
+}
+
 func (a *API) Routes() chi.Router {
 	r := chi.NewRouter()
 	r.Use(chimw.Logger)
@@ -73,7 +121,10 @@ func (a *API) Routes() chi.Router {
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(tenantmw.TenantMiddleware(a.resolver))
 		r.Post("/transactions", a.HandleSubmitTransaction)
+		r.Get("/transactions", a.ListTransactions)
+		r.Get("/transactions/{id}", a.GetTransactionByID)
 		r.Get("/balance", a.GetBalance)
+		r.Get("/ledger", a.ListLedgerEntries)
 	})
 
 	return r
@@ -147,6 +198,60 @@ func (a *API) HandleSubmitTransaction(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(respBytes)
 }
 
+func (a *API) GetTransactionByID(w http.ResponseWriter, r *http.Request) {
+	merchant := tenantmw.MerchantFromContext(r.Context())
+	txID := chi.URLParam(r, "id")
+
+	tx, err := a.ledgerService.GetTransactionByID(r.Context(), merchant.ID, txID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Could not fetch transaction")
+		return
+	}
+	if tx == nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", fmt.Sprintf("Transaction %s not found", txID))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(tx)
+}
+
+func (a *API) ListTransactions(w http.ResponseWriter, r *http.Request) {
+	merchant := tenantmw.MerchantFromContext(r.Context())
+	statusFilter := r.URL.Query().Get("status")
+
+	if statusFilter != "" &&
+		statusFilter != string(domain.TransactionStatusPending) &&
+		statusFilter != string(domain.TransactionStatusCompleted) &&
+		statusFilter != string(domain.TransactionStatusFailed) {
+		writeError(w, http.StatusBadRequest, "INVALID_FILTER", "status must be pending, completed, or failed")
+		return
+	}
+
+	page, limit, offset := parsePagination(r)
+
+	txs, total, err := a.ledgerService.ListTransactions(r.Context(), merchant.ID, statusFilter, limit, offset)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Could not list transactions")
+		return
+	}
+
+	if txs == nil {
+		txs = []*domain.Transaction{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(PaginatedResponse{
+		Data: txs,
+		Pagination: Pagination{
+			Page:       page,
+			Limit:      limit,
+			Total:      total,
+			TotalPages: totalPages(total, limit),
+		},
+	})
+}
+
 func (a *API) GetBalance(w http.ResponseWriter, r *http.Request) {
 	merchant := tenantmw.MerchantFromContext(r.Context())
 
@@ -161,5 +266,31 @@ func (a *API) GetBalance(w http.ResponseWriter, r *http.Request) {
 		"merchant_id": merchant.ID,
 		"balance":     balance,
 		"currency":    currency,
+	})
+}
+
+func (a *API) ListLedgerEntries(w http.ResponseWriter, r *http.Request) {
+	merchant := tenantmw.MerchantFromContext(r.Context())
+	page, limit, offset := parsePagination(r)
+
+	entries, total, err := a.ledgerService.ListLedgerEntries(r.Context(), merchant.ID, limit, offset)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Could not list ledger entries")
+		return
+	}
+
+	if entries == nil {
+		entries = []*domain.LedgerEntry{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(PaginatedResponse{
+		Data: entries,
+		Pagination: Pagination{
+			Page:       page,
+			Limit:      limit,
+			Total:      total,
+			TotalPages: totalPages(total, limit),
+		},
 	})
 }
