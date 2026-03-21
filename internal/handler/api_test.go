@@ -105,8 +105,16 @@ func newActiveResolver() *mockResolver {
 	return &mockResolver{merchant: activeMerchant}
 }
 
+type mockHealthChecker struct {
+	err error
+}
+
+func (m *mockHealthChecker) Ping(_ context.Context) error {
+	return m.err
+}
+
 func newTestAPI(ls handler.LedgerService, ic handler.IdempotencyChecker, pool handler.TaskSubmitter, resolver middleware.MerchantResolver) *handler.API {
-	return handler.NewAPI(pool, ic, ls, resolver)
+	return handler.NewAPI(pool, ic, ls, resolver, nil, nil)
 }
 
 func do(api *handler.API, method, path, apiKey string, body []byte) *httptest.ResponseRecorder {
@@ -124,10 +132,27 @@ func do(api *handler.API, method, path, apiKey string, body []byte) *httptest.Re
 	return rr
 }
 
-func TestHealth(t *testing.T) {
-	rr := do(newTestAPI(nil, nil, nil, nil), http.MethodGet, "/health", "", nil)
+func TestHealth_OK(t *testing.T) {
+	api := handler.NewAPI(nil, nil, nil, nil, &mockHealthChecker{}, &mockHealthChecker{})
+	rr := do(api, http.MethodGet, "/health", "", nil)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rr.Code)
+		t.Fatalf("expected 200, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHealth_DBDown(t *testing.T) {
+	api := handler.NewAPI(nil, nil, nil, nil, &mockHealthChecker{err: errors.New("db down")}, &mockHealthChecker{})
+	rr := do(api, http.MethodGet, "/health", "", nil)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", rr.Code)
+	}
+}
+
+func TestHealth_CacheDown(t *testing.T) {
+	api := handler.NewAPI(nil, nil, nil, nil, &mockHealthChecker{}, &mockHealthChecker{err: errors.New("redis down")})
+	rr := do(api, http.MethodGet, "/health", "", nil)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", rr.Code)
 	}
 }
 
@@ -338,5 +363,51 @@ func TestListTransactions_EmptyResult(t *testing.T) {
 	data := resp["data"].([]interface{})
 	if len(data) != 0 {
 		t.Errorf("expected empty data array, got %d items", len(data))
+	}
+}
+
+func TestListLedgerEntries_OK(t *testing.T) {
+	entries := []*domain.LedgerEntry{
+		{ID: "le-1", TransactionRef: "ref-001", ChangeAmount: 1500, PreviousBalance: 0, NewBalance: 1500, CreatedAt: time.Now()},
+		{ID: "le-2", TransactionRef: "ref-002", ChangeAmount: -500, PreviousBalance: 1500, NewBalance: 1000, CreatedAt: time.Now()},
+	}
+	ls := &mockLedgerService{entries: entries, total: 2}
+	rr := do(newTestAPI(ls, nil, nil, newActiveResolver()), http.MethodGet, "/api/v1/ledger?page=1&limit=10", "sk", nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d — body: %s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	pagination := resp["pagination"].(map[string]interface{})
+	if pagination["total"] != float64(2) {
+		t.Errorf("expected total 2, got %v", pagination["total"])
+	}
+}
+
+func TestListLedgerEntries_EmptyResult(t *testing.T) {
+	ls := &mockLedgerService{entries: nil, total: 0}
+	rr := do(newTestAPI(ls, nil, nil, newActiveResolver()), http.MethodGet, "/api/v1/ledger", "sk", nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	var resp map[string]interface{}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	data := resp["data"].([]interface{})
+	if len(data) != 0 {
+		t.Errorf("expected empty data array, got %d items", len(data))
+	}
+}
+
+func TestListLedgerEntries_ServiceError(t *testing.T) {
+	ls := &mockLedgerService{err: errors.New("db error")}
+	rr := do(newTestAPI(ls, nil, nil, newActiveResolver()), http.MethodGet, "/api/v1/ledger", "sk", nil)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", rr.Code)
 	}
 }

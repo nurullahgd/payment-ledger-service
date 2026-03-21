@@ -32,19 +32,27 @@ type TaskSubmitter interface {
 	Submit(task worker.TransactionTask) error
 }
 
+type HealthChecker interface {
+	Ping(ctx context.Context) error
+}
+
 type API struct {
 	pool          TaskSubmitter
 	idempotency   IdempotencyChecker
 	ledgerService LedgerService
 	resolver      tenantmw.MerchantResolver
+	db            HealthChecker
+	cache         HealthChecker
 }
 
-func NewAPI(pool TaskSubmitter, idempRepo IdempotencyChecker, ls LedgerService, resolver tenantmw.MerchantResolver) *API {
+func NewAPI(pool TaskSubmitter, idempRepo IdempotencyChecker, ls LedgerService, resolver tenantmw.MerchantResolver, db, cache HealthChecker) *API {
 	return &API{
 		pool:          pool,
 		idempotency:   idempRepo,
 		ledgerService: ls,
 		resolver:      resolver,
+		db:            db,
+		cache:         cache,
 	}
 }
 
@@ -113,10 +121,7 @@ func (a *API) Routes() chi.Router {
 	r.Use(chimw.Recoverer)
 	r.Use(chimw.RequestID)
 
-	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("OK"))
-	})
+	r.Get("/health", a.Health)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(tenantmw.TenantMiddleware(a.resolver))
@@ -128,6 +133,32 @@ func (a *API) Routes() chi.Router {
 	})
 
 	return r
+}
+
+func (a *API) Health(w http.ResponseWriter, r *http.Request) {
+	status := map[string]string{
+		"db":    "ok",
+		"cache": "ok",
+	}
+	httpStatus := http.StatusOK
+
+	if a.db != nil {
+		if err := a.db.Ping(r.Context()); err != nil {
+			status["db"] = "unavailable"
+			httpStatus = http.StatusServiceUnavailable
+		}
+	}
+
+	if a.cache != nil {
+		if err := a.cache.Ping(r.Context()); err != nil {
+			status["cache"] = "unavailable"
+			httpStatus = http.StatusServiceUnavailable
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(httpStatus)
+	_ = json.NewEncoder(w).Encode(status)
 }
 
 type SubmitTransactionRequest struct {

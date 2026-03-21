@@ -23,7 +23,9 @@ func NewRedisCache(ctx context.Context, addr, password string, db int) (*RedisCa
 		return nil, fmt.Errorf("failed to connect to redis: %w", err)
 	}
 
-	return &RedisCache{
-		Client: client,
-	}, nil
+	return &RedisCache{Client: client}, nil
+}
+
+func (r *RedisCache) Ping(ctx context.Context) error {
+	return r.Client.Ping(ctx).Err()
 }
