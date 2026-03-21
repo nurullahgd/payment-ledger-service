@@ -12,6 +12,7 @@ import (
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/nurullahgd/payment-ledger-service/internal/domain"
 	tenantmw "github.com/nurullahgd/payment-ledger-service/internal/middleware"
+	"github.com/nurullahgd/payment-ledger-service/internal/ratelimit"
 	"github.com/nurullahgd/payment-ledger-service/pkg/worker"
 )
 
@@ -41,16 +42,18 @@ type API struct {
 	idempotency   IdempotencyChecker
 	ledgerService LedgerService
 	resolver      tenantmw.MerchantResolver
+	rateLimiter   ratelimit.Limiter
 	db            HealthChecker
 	cache         HealthChecker
 }
 
-func NewAPI(pool TaskSubmitter, idempRepo IdempotencyChecker, ls LedgerService, resolver tenantmw.MerchantResolver, db, cache HealthChecker) *API {
+func NewAPI(pool TaskSubmitter, idempRepo IdempotencyChecker, ls LedgerService, resolver tenantmw.MerchantResolver, rateLimiter ratelimit.Limiter, db, cache HealthChecker) *API {
 	return &API{
 		pool:          pool,
 		idempotency:   idempRepo,
 		ledgerService: ls,
 		resolver:      resolver,
+		rateLimiter:   rateLimiter,
 		db:            db,
 		cache:         cache,
 	}
@@ -125,6 +128,7 @@ func (a *API) Routes() chi.Router {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(tenantmw.TenantMiddleware(a.resolver))
+		r.Use(tenantmw.RateLimitMiddleware(a.rateLimiter))
 		r.Post("/transactions", a.HandleSubmitTransaction)
 		r.Get("/transactions", a.ListTransactions)
 		r.Get("/transactions/{id}", a.GetTransactionByID)

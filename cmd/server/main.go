@@ -12,6 +12,7 @@ import (
 
 	"github.com/nurullahgd/payment-ledger-service/internal/config"
 	"github.com/nurullahgd/payment-ledger-service/internal/handler"
+	"github.com/nurullahgd/payment-ledger-service/internal/ratelimit"
 	"github.com/nurullahgd/payment-ledger-service/internal/repository"
 	"github.com/nurullahgd/payment-ledger-service/internal/service"
 	"github.com/nurullahgd/payment-ledger-service/pkg/worker"
@@ -49,7 +50,8 @@ func main() {
 	pool := worker.NewPool(cfg.WorkerCount, 1000, ledgerRepo)
 	pool.Start(ctx)
 
-	api := handler.NewAPI(pool, idempotencyRepo, ledgerService, tenantRepo, dbPool, redisCache)
+	limiter := ratelimit.NewSlidingWindowLimiter(redisCache.Client, cfg.RateLimitPerMinute, 60)
+	api := handler.NewAPI(pool, idempotencyRepo, ledgerService, tenantRepo, limiter, dbPool, redisCache)
 	router := api.Routes()
 
 	srv := &http.Server{

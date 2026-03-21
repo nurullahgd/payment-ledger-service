@@ -114,7 +114,7 @@ func (m *mockHealthChecker) Ping(_ context.Context) error {
 }
 
 func newTestAPI(ls handler.LedgerService, ic handler.IdempotencyChecker, pool handler.TaskSubmitter, resolver middleware.MerchantResolver) *handler.API {
-	return handler.NewAPI(pool, ic, ls, resolver, nil, nil)
+	return handler.NewAPI(pool, ic, ls, resolver, nil, nil, nil)
 }
 
 func do(api *handler.API, method, path, apiKey string, body []byte) *httptest.ResponseRecorder {
@@ -133,7 +133,7 @@ func do(api *handler.API, method, path, apiKey string, body []byte) *httptest.Re
 }
 
 func TestHealth_OK(t *testing.T) {
-	api := handler.NewAPI(nil, nil, nil, nil, &mockHealthChecker{}, &mockHealthChecker{})
+	api := handler.NewAPI(nil, nil, nil, nil, nil, &mockHealthChecker{}, &mockHealthChecker{})
 	rr := do(api, http.MethodGet, "/health", "", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d — body: %s", rr.Code, rr.Body.String())
@@ -141,7 +141,7 @@ func TestHealth_OK(t *testing.T) {
 }
 
 func TestHealth_DBDown(t *testing.T) {
-	api := handler.NewAPI(nil, nil, nil, nil, &mockHealthChecker{err: errors.New("db down")}, &mockHealthChecker{})
+	api := handler.NewAPI(nil, nil, nil, nil, nil, &mockHealthChecker{err: errors.New("db down")}, &mockHealthChecker{})
 	rr := do(api, http.MethodGet, "/health", "", nil)
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d", rr.Code)
@@ -149,7 +149,7 @@ func TestHealth_DBDown(t *testing.T) {
 }
 
 func TestHealth_CacheDown(t *testing.T) {
-	api := handler.NewAPI(nil, nil, nil, nil, &mockHealthChecker{}, &mockHealthChecker{err: errors.New("redis down")})
+	api := handler.NewAPI(nil, nil, nil, nil, nil, &mockHealthChecker{}, &mockHealthChecker{err: errors.New("redis down")})
 	rr := do(api, http.MethodGet, "/health", "", nil)
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d", rr.Code)
