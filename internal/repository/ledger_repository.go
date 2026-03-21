@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nurullahgd/payment-ledger-service/internal/domain"
 )
 
 var ErrInsufficientBalance = errors.New("INSUFFICIENT_BALANCE")
@@ -37,6 +38,110 @@ func (r *LedgerRepository) InsertPendingTransaction(ctx context.Context, merchan
 	}
 
 	return txID, nil
+}
+
+func (r *LedgerRepository) GetTransactionByID(ctx context.Context, merchantID, txID string) (*domain.Transaction, error) {
+	schemaName := fmt.Sprintf("tenant_%s", strings.ReplaceAll(merchantID, "-", "_"))
+
+	query := fmt.Sprintf(`
+		SELECT id, reference, type, amount, status, COALESCE(description, ''), created_at
+		FROM %s.transactions
+		WHERE id = $1
+	`, schemaName)
+
+	var tx domain.Transaction
+	var status string
+
+	err := r.db.QueryRow(ctx, query, txID).Scan(
+		&tx.ID, &tx.Reference, &tx.Type, &tx.Amount, &status, &tx.Description, &tx.CreatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get transaction by id: %w", err)
+	}
+
+	tx.Status = domain.TransactionStatus(status)
+	return &tx, nil
+}
+
+func (r *LedgerRepository) ListTransactions(ctx context.Context, merchantID, statusFilter string, limit, offset int) ([]*domain.Transaction, int, error) {
+	schemaName := fmt.Sprintf("tenant_%s", strings.ReplaceAll(merchantID, "-", "_"))
+
+	args := []interface{}{limit, offset}
+	whereClause := ""
+
+	if statusFilter != "" {
+		whereClause = "WHERE status = $3"
+		args = append(args, statusFilter)
+	}
+
+	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM %s.transactions %s`, schemaName, whereClause)
+	listQuery := fmt.Sprintf(`
+		SELECT id, reference, type, amount, status, COALESCE(description, ''), created_at
+		FROM %s.transactions %s
+		ORDER BY created_at DESC
+		LIMIT $1 OFFSET $2
+	`, schemaName, whereClause)
+
+	var total int
+	if err := r.db.QueryRow(ctx, countQuery, args[2:]...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("failed to count transactions: %w", err)
+	}
+
+	rows, err := r.db.Query(ctx, listQuery, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to list transactions: %w", err)
+	}
+	defer rows.Close()
+
+	var txs []*domain.Transaction
+	for rows.Next() {
+		var tx domain.Transaction
+		var status string
+		if err := rows.Scan(&tx.ID, &tx.Reference, &tx.Type, &tx.Amount, &status, &tx.Description, &tx.CreatedAt); err != nil {
+			return nil, 0, fmt.Errorf("failed to scan transaction row: %w", err)
+		}
+		tx.Status = domain.TransactionStatus(status)
+		txs = append(txs, &tx)
+	}
+
+	return txs, total, nil
+}
+
+func (r *LedgerRepository) ListLedgerEntries(ctx context.Context, merchantID string, limit, offset int) ([]*domain.LedgerEntry, int, error) {
+	schemaName := fmt.Sprintf("tenant_%s", strings.ReplaceAll(merchantID, "-", "_"))
+
+	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM %s.ledger`, schemaName)
+	listQuery := fmt.Sprintf(`
+		SELECT id, transaction_ref, previous_balance, new_balance, change_amount, created_at
+		FROM %s.ledger
+		ORDER BY created_at DESC
+		LIMIT $1 OFFSET $2
+	`, schemaName)
+
+	var total int
+	if err := r.db.QueryRow(ctx, countQuery).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("failed to count ledger entries: %w", err)
+	}
+
+	rows, err := r.db.Query(ctx, listQuery, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to list ledger entries: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []*domain.LedgerEntry
+	for rows.Next() {
+		var e domain.LedgerEntry
+		if err := rows.Scan(&e.ID, &e.TransactionRef, &e.PreviousBalance, &e.NewBalance, &e.ChangeAmount, &e.CreatedAt); err != nil {
+			return nil, 0, fmt.Errorf("failed to scan ledger row: %w", err)
+		}
+		entries = append(entries, &e)
+	}
+
+	return entries, total, nil
 }
 
 func (r *LedgerRepository) ProcessTransaction(ctx context.Context, merchantID string, txRef string, txType string, amount int64) error {
