@@ -68,7 +68,9 @@ func TestResult_CalledWithCorrectKey(t *testing.T) {
 	limiter := &mockLimiter{result: ratelimit.Result{Allowed: true}}
 
 	for i := 0; i < 3; i++ {
-		limiter.Allow(context.Background(), ratelimit.MerchantKey("merchant_1"))
+		if _, err := limiter.Allow(context.Background(), ratelimit.MerchantKey("merchant_1")); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 	}
 
 	if limiter.calls != 3 {

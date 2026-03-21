@@ -106,10 +106,10 @@ func seedTransactions(ctx context.Context, db *pgxpool.Pool, merchantID string) 
 	finalBalance := int64(500000 + 150000 - 75000 - 30000)
 
 	ledgerEntries := []struct {
-		ref      string
-		prev     int64
-		next     int64
-		change   int64
+		ref    string
+		prev   int64
+		next   int64
+		change int64
 	}{
 		{"seed-credit-001", 0, 500000, 500000},
 		{"seed-credit-002", 500000, 650000, 150000},

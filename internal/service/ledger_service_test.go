@@ -21,12 +21,12 @@ func (m *mockBalanceGetter) GetBalance(_ context.Context, _ string) (int64, stri
 }
 
 type mockTransactionRepository struct {
-	txID        string
-	transaction *domain.Transaction
+	txID         string
+	transaction  *domain.Transaction
 	transactions []*domain.Transaction
-	total       int
-	entries     []*domain.LedgerEntry
-	err         error
+	total        int
+	entries      []*domain.LedgerEntry
+	err          error
 }
 
 func (m *mockTransactionRepository) InsertPendingTransaction(_ context.Context, _, _, _, _ string, _ int64) (string, error) {
