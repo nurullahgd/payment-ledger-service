@@ -69,28 +69,34 @@ func (r *LedgerRepository) GetTransactionByID(ctx context.Context, merchantID, t
 func (r *LedgerRepository) ListTransactions(ctx context.Context, merchantID, statusFilter string, limit, offset int) ([]*domain.Transaction, int, error) {
 	schemaName := fmt.Sprintf("tenant_%s", strings.ReplaceAll(merchantID, "-", "_"))
 
-	args := []interface{}{limit, offset}
-	whereClause := ""
-
+	countWhere := ""
+	var countArgs []interface{}
 	if statusFilter != "" {
-		whereClause = "WHERE status = $3"
-		args = append(args, statusFilter)
+		countWhere = "WHERE status = $1"
+		countArgs = []interface{}{statusFilter}
 	}
 
-	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM %s.transactions %s`, schemaName, whereClause)
+	var total int
+	countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM %s.transactions %s`, schemaName, countWhere)
+	if err := r.db.QueryRow(ctx, countQuery, countArgs...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("failed to count transactions: %w", err)
+	}
+
+	listWhere := ""
+	listArgs := []interface{}{limit, offset}
+	if statusFilter != "" {
+		listWhere = "WHERE status = $3"
+		listArgs = append(listArgs, statusFilter)
+	}
+
 	listQuery := fmt.Sprintf(`
 		SELECT id, reference, type, amount, status, COALESCE(description, ''), created_at
 		FROM %s.transactions %s
 		ORDER BY created_at DESC
 		LIMIT $1 OFFSET $2
-	`, schemaName, whereClause)
+	`, schemaName, listWhere)
 
-	var total int
-	if err := r.db.QueryRow(ctx, countQuery, args[2:]...).Scan(&total); err != nil {
-		return nil, 0, fmt.Errorf("failed to count transactions: %w", err)
-	}
-
-	rows, err := r.db.Query(ctx, listQuery, args...)
+	rows, err := r.db.Query(ctx, listQuery, listArgs...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to list transactions: %w", err)
 	}
