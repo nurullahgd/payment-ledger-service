@@ -25,3 +25,24 @@ func TestMerchant_IsActive(t *testing.T) {
 		})
 	}
 }
+
+func TestTransaction_IsTerminal(t *testing.T) {
+	tests := []struct {
+		name   string
+		status domain.TransactionStatus
+		want   bool
+	}{
+		{"pending is not terminal", domain.TransactionStatusPending, false},
+		{"completed is terminal", domain.TransactionStatusCompleted, true},
+		{"failed is terminal", domain.TransactionStatusFailed, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tx := &domain.Transaction{Status: tt.status}
+			if got := tx.IsTerminal(); got != tt.want {
+				t.Errorf("IsTerminal() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
