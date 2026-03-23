@@ -3,6 +3,7 @@ package service_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,15 +22,20 @@ func (m *mockBalanceGetter) GetBalance(_ context.Context, _ string) (int64, stri
 }
 
 type mockTransactionRepository struct {
+	mu           sync.Mutex
 	txID         string
 	transaction  *domain.Transaction
 	transactions []*domain.Transaction
 	total        int
 	entries      []*domain.LedgerEntry
 	err          error
+	insertCalls  int
 }
 
 func (m *mockTransactionRepository) InsertPendingTransaction(_ context.Context, _, _, _, _ string, _ int64) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.insertCalls++
 	return m.txID, m.err
 }
 
@@ -174,6 +180,42 @@ func TestListTransactions(t *testing.T) {
 	}
 	if len(result) != 2 {
 		t.Errorf("want 2 transactions, got %d", len(result))
+	}
+}
+
+// TestCreatePendingTransaction_ConcurrentCalls verifies that the service is safe
+// to call from multiple goroutines simultaneously (run with -race flag).
+func TestCreatePendingTransaction_ConcurrentCalls(t *testing.T) {
+	const goroutines = 20
+
+	repo := &mockTransactionRepository{txID: "tx-concurrent"}
+	svc := service.NewLedgerService(&mockBalanceGetter{balance: 100000, currency: "USD"}, repo)
+
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			_, err := svc.CreatePendingTransaction(
+				context.Background(),
+				"merchant_1",
+				"ref-concurrent",
+				"credit",
+				"test",
+				int64(n*100),
+			)
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+	if repo.insertCalls != goroutines {
+		t.Errorf("expected %d insert calls, got %d", goroutines, repo.insertCalls)
 	}
 }
 
