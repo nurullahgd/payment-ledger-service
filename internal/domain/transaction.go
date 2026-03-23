@@ -1,6 +1,11 @@
 package domain
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+var ErrDuplicateReference = errors.New("DUPLICATE_REFERENCE")
 
 type TransactionStatus string
 

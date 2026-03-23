@@ -8,9 +8,11 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nurullahgd/payment-ledger-service/internal/domain"
 )
+
 
 var ErrInsufficientBalance = errors.New("INSUFFICIENT_BALANCE")
 
@@ -34,10 +36,32 @@ func (r *LedgerRepository) InsertPendingTransaction(ctx context.Context, merchan
 
 	err := r.db.QueryRow(ctx, query, reference, txType, amount, description).Scan(&txID)
 	if err != nil {
+		if isUniqueViolation(err) {
+			existingID, fetchErr := r.getIDByReference(ctx, schemaName, reference)
+			if fetchErr != nil {
+				return "", fmt.Errorf("failed to fetch existing transaction: %w", fetchErr)
+			}
+			return existingID, domain.ErrDuplicateReference
+		}
 		return "", fmt.Errorf("failed to insert pending transaction: %w", err)
 	}
 
 	return txID, nil
+}
+
+func (r *LedgerRepository) getIDByReference(ctx context.Context, schemaName, reference string) (string, error) {
+	var id string
+	query := fmt.Sprintf(`SELECT id FROM %s.transactions WHERE reference = $1 LIMIT 1`, schemaName)
+	err := r.db.QueryRow(ctx, query, reference).Scan(&id)
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
 func (r *LedgerRepository) GetTransactionByID(ctx context.Context, merchantID, txID string) (*domain.Transaction, error) {
