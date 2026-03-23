@@ -12,9 +12,8 @@ import (
 )
 
 type mockProcessor struct {
-	mu      sync.Mutex
-	calls   []string
-	failRef string
+	mu    sync.Mutex
+	calls []string
 }
 
 func (m *mockProcessor) ProcessTransaction(_ context.Context, _ string, ref string, _ string, _ int64) error {
