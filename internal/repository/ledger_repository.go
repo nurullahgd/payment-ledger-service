@@ -13,7 +13,6 @@ import (
 	"github.com/nurullahgd/payment-ledger-service/internal/domain"
 )
 
-
 var ErrInsufficientBalance = errors.New("INSUFFICIENT_BALANCE")
 
 type LedgerRepository struct {
