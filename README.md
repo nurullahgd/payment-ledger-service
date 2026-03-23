@@ -1,5 +1,9 @@
 # Payment Ledger Service
 
+[![CI](https://github.com/nurullahgd/payment-ledger-service/actions/workflows/ci.yml/badge.svg)](https://github.com/nurullahgd/payment-ledger-service/actions/workflows/ci.yml)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/nurullahgd/payment-ledger-service)](go.mod)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A multi-tenant payment ledger service built in Go. Each merchant operates in an isolated PostgreSQL schema. Transactions are processed asynchronously via a worker pool, with webhook notifications delivered on terminal states.
 
 ## Architecture
