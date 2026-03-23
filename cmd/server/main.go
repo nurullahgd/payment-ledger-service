@@ -15,6 +15,7 @@ import (
 	"github.com/nurullahgd/payment-ledger-service/internal/ratelimit"
 	"github.com/nurullahgd/payment-ledger-service/internal/repository"
 	"github.com/nurullahgd/payment-ledger-service/internal/service"
+	"github.com/nurullahgd/payment-ledger-service/internal/webhook"
 	"github.com/nurullahgd/payment-ledger-service/pkg/worker"
 )
 
@@ -47,7 +48,8 @@ func main() {
 	idempotencyRepo := repository.NewIdempotencyRepository(redisCache.Client, 24*time.Hour)
 	ledgerService := service.NewLedgerService(tenantRepo, ledgerRepo)
 
-	pool := worker.NewPool(cfg.WorkerCount, 1000, ledgerRepo)
+	webhookNotifier := webhook.NewHTTPNotifier()
+	pool := worker.NewPool(cfg.WorkerCount, 1000, ledgerRepo, webhookNotifier)
 	pool.Start(ctx)
 
 	limiter := ratelimit.NewSlidingWindowLimiter(redisCache.Client, cfg.RateLimitPerMinute, 60)

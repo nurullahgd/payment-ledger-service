@@ -150,6 +150,22 @@ func (r *LedgerRepository) ListLedgerEntries(ctx context.Context, merchantID str
 	return entries, total, nil
 }
 
+func (r *LedgerRepository) GetTransactionID(ctx context.Context, merchantID, reference string) (string, error) {
+	schemaName := fmt.Sprintf("tenant_%s", strings.ReplaceAll(merchantID, "-", "_"))
+	query := fmt.Sprintf(`SELECT id FROM %s.transactions WHERE reference = $1 LIMIT 1`, schemaName)
+
+	var txID string
+	err := r.db.QueryRow(ctx, query, reference).Scan(&txID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("transaction not found for reference %s", reference)
+		}
+		return "", fmt.Errorf("failed to get transaction id: %w", err)
+	}
+
+	return txID, nil
+}
+
 func (r *LedgerRepository) ProcessTransaction(ctx context.Context, merchantID string, txRef string, txType string, amount int64) error {
 	schemaName := fmt.Sprintf("tenant_%s", strings.ReplaceAll(merchantID, "-", "_"))
 

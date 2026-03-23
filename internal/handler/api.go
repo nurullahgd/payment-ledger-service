@@ -223,6 +223,7 @@ func (a *API) HandleSubmitTransaction(w http.ResponseWriter, r *http.Request) {
 		Type:        req.Type,
 		Amount:      req.Amount,
 		Description: req.Description,
+		WebhookURL:  merchant.WebhookURL,
 	}); err != nil {
 		writeError(w, http.StatusTooManyRequests, "QUEUE_FULL", "System is under heavy load, please try again")
 		return
