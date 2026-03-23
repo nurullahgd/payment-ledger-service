@@ -213,6 +213,16 @@ GitHub Actions runs three parallel jobs on every push:
 - **test** — `go test -race -coverprofile=coverage.out ./...` with PostgreSQL and Redis services
 - **build** — Docker multi-stage image build
 
+## Redis Usage
+
+Redis is used in two places, both chosen deliberately over alternatives:
+
+**Idempotency cache** — When a transaction is submitted, the handler checks a Redis key `idempotency:{merchantID}:{reference}` before hitting the database. If the key exists, the cached response is returned immediately with `Idempotency-Replayed: true`. The key is set after the DB insert succeeds, so the real transaction ID is always in the cached response. TTL is 24 hours. If Redis is unavailable, the request falls through to the DB — the `UNIQUE` constraint on `reference` acts as a second line of defence against duplicates.
+
+**Per-merchant rate limiting** — A sliding window counter is stored as a Redis sorted set (`ratelimit:{merchantID}`). Each request adds a timestamped member, old members outside the 60-second window are removed, and the count is compared against the limit — all in a single pipeline. This is inherently distributed: multiple service instances share the same counters without coordination overhead.
+
+Redis is **not** used as a job queue. The worker pool uses an in-memory Go channel, which is simpler operationally. The trade-off is that pending tasks are lost on restart — a persistent queue (Kafka, SQS) would solve this and is listed as a future improvement.
+
 ## Design Tradeoffs
 
 | Decision | Alternative | Reason |
