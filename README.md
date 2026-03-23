@@ -175,20 +175,31 @@ Returns `503` if either dependency is unavailable.
 | `WORKER_COUNT` | `5` | Number of background worker goroutines |
 | `RATE_LIMIT_PER_MINUTE` | `60` | Max requests per merchant per 60 seconds |
 
+## Amount Unit
+
+All `amount` values are in the **smallest currency unit** (cents for USD, kuruş for TRY). This avoids floating-point precision issues.
+
+| amount value | USD | TRY |
+|---|---|---|
+| `100` | $1.00 | ₺1,00 |
+| `1500` | $15.00 | ₺15,00 |
+| `10000` | $100.00 | ₺100,00 |
+
 ## Testing
 
 ```bash
 # Unit tests
 go test ./...
 
-# With race detector
+# With race detector (recommended)
 go test -race ./...
 
 # Integration tests (requires running PostgreSQL)
-DATABASE_URL=postgres://... go test ./internal/repository/... -v -run Integration
+DATABASE_URL=postgres://ledger_user:ledger_password@localhost:5433/ledger_db?sslmode=disable \
+  go test -race -v ./internal/repository/... -run "TestProcessTransaction"
 ```
 
-Integration tests are skipped automatically when `DATABASE_URL` is not set.
+Integration tests in `internal/repository/ledger_repository_integration_test.go` are skipped automatically when `DATABASE_URL` is not set. In CI, they run as part of the full test suite since `DATABASE_URL` is provided.
 
 ## CI/CD
 

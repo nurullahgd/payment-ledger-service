@@ -71,6 +71,12 @@ jobs:
           RATE_LIMIT_PER_MINUTE: 60
         run: go test -race -coverprofile=coverage.out ./...
 
+      - name: Run Integration Tests (verbose)
+        env:
+          DATABASE_URL: postgres://testuser:testpassword@localhost:5432/testdb?sslmode=disable
+          REDIS_ADDR: localhost:6379
+        run: go test -race -v ./internal/repository/... -run "TestProcessTransaction"
+
       - name: Upload Coverage Report
         uses: actions/upload-artifact@v4
         with:
