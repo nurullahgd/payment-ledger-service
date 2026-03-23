@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -67,12 +68,13 @@ type ErrorResponse struct {
 	} `json:"error"`
 }
 
-func writeError(w http.ResponseWriter, status int, code, message string) {
+func writeError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	resp := ErrorResponse{}
 	resp.Error.Code = code
 	resp.Error.Message = message
+	resp.Error.RequestID = chimw.GetReqID(r.Context())
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
@@ -178,18 +180,18 @@ func (a *API) HandleSubmitTransaction(w http.ResponseWriter, r *http.Request) {
 
 	var req SubmitTransactionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "MALFORMED_REQUEST", "Invalid JSON payload")
+		writeError(w, r, http.StatusBadRequest, "MALFORMED_REQUEST", "Invalid JSON payload")
 		return
 	}
 
 	if req.Reference == "" || (req.Type != "credit" && req.Type != "debit") || req.Amount <= 0 {
-		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "Invalid input parameters")
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", "Invalid input parameters")
 		return
 	}
 
 	cached, isReplayed, err := a.idempotency.Get(r.Context(), merchant.ID, req.Reference)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Idempotency check failed")
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Idempotency check failed")
 		return
 	}
 
@@ -203,7 +205,19 @@ func (a *API) HandleSubmitTransaction(w http.ResponseWriter, r *http.Request) {
 
 	txID, err := a.ledgerService.CreatePendingTransaction(r.Context(), merchant.ID, req.Reference, req.Type, req.Description, req.Amount)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Could not create transaction")
+		if errors.Is(err, domain.ErrDuplicateReference) {
+			respBytes, _ := json.Marshal(map[string]string{
+				"id":        txID,
+				"status":    "pending",
+				"reference": req.Reference,
+			})
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Idempotency-Replayed", "true")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write(respBytes)
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Could not create transaction")
 		return
 	}
 
@@ -225,7 +239,7 @@ func (a *API) HandleSubmitTransaction(w http.ResponseWriter, r *http.Request) {
 		Description: req.Description,
 		WebhookURL:  merchant.WebhookURL,
 	}); err != nil {
-		writeError(w, http.StatusTooManyRequests, "QUEUE_FULL", "System is under heavy load, please try again")
+		writeError(w, r, http.StatusTooManyRequests, "QUEUE_FULL", "System is under heavy load, please try again")
 		return
 	}
 
@@ -240,11 +254,11 @@ func (a *API) GetTransactionByID(w http.ResponseWriter, r *http.Request) {
 
 	tx, err := a.ledgerService.GetTransactionByID(r.Context(), merchant.ID, txID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Could not fetch transaction")
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Could not fetch transaction")
 		return
 	}
 	if tx == nil {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", fmt.Sprintf("Transaction %s not found", txID))
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", fmt.Sprintf("Transaction %s not found", txID))
 		return
 	}
 
@@ -260,7 +274,7 @@ func (a *API) ListTransactions(w http.ResponseWriter, r *http.Request) {
 		statusFilter != string(domain.TransactionStatusPending) &&
 		statusFilter != string(domain.TransactionStatusCompleted) &&
 		statusFilter != string(domain.TransactionStatusFailed) {
-		writeError(w, http.StatusBadRequest, "INVALID_FILTER", "status must be pending, completed, or failed")
+		writeError(w, r, http.StatusBadRequest, "INVALID_FILTER", "status must be pending, completed, or failed")
 		return
 	}
 
@@ -268,7 +282,7 @@ func (a *API) ListTransactions(w http.ResponseWriter, r *http.Request) {
 
 	txs, total, err := a.ledgerService.ListTransactions(r.Context(), merchant.ID, statusFilter, limit, offset)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Could not list transactions")
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Could not list transactions")
 		return
 	}
 
@@ -293,7 +307,7 @@ func (a *API) GetBalance(w http.ResponseWriter, r *http.Request) {
 
 	balance, currency, err := a.ledgerService.GetCurrentBalance(r.Context(), merchant.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Could not fetch balance")
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Could not fetch balance")
 		return
 	}
 
@@ -311,7 +325,7 @@ func (a *API) ListLedgerEntries(w http.ResponseWriter, r *http.Request) {
 
 	entries, total, err := a.ledgerService.ListLedgerEntries(r.Context(), merchant.ID, limit, offset)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Could not list ledger entries")
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Could not list ledger entries")
 		return
 	}
 
